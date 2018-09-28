@@ -186,7 +186,7 @@ resources:
                       fi
                     
                       # Install kubelet kubeadm and kubectl
-                      for PKGNAME in kubelet kubeadm kubectl; do
+                      for PKGNAME in kubectl kubelet kubeadm; do
                         dpkg -s ${PKGNAME} > /dev/null 2>&1
                         if [ $? != 0 ] ; then
                           echo "Installing ${PKGNAME}=%kube_version%"
@@ -387,7 +387,7 @@ resources:
                       fi
                     
                       # Install kubelet kubeadm and kubectl
-                      for PKGNAME in kubelet kubeadm kubectl; do
+                      for PKGNAME in kubectl kubelet kubeadm; do
                         dpkg -s ${PKGNAME} > /dev/null 2>&1
                         if [ $? != 0 ] ; then
                           echo "Installing ${PKGNAME}=%kube_version%"
