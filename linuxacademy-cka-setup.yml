@@ -25,7 +25,7 @@ parameters:
   key_name:
     type: string
     label: Key Name
-    description: Name of the key-pair to be used for the compute instance
+    description: Name of the key-pair to be used for the initial logins(user ubuntu or centos depending)
     default: deploy-phobos
   step:
     type: string
