@@ -16,6 +16,7 @@ Parameters:
 * master_flavor: Flavor to use for the master node.
 * key_name: You existing ssh key name in openstack to be used for connecting to the vms.
 * network_id: Openstack neutron network id to connect your vms to.
+* kube_version: Used when installing the debian packages.  Defaults to 1.11.3-00 as its one step behind the current 1.12.0-00. This is for the upgrade labs.
 * step: 'noaction, 'reposetup' or 'init_n_slaves' with a default of noaction.  
   * 'noaction': If you want to do kube cluster from scratch use noaction.  
   * 'reposetup': If you want to have the repos set up with docker.io, kubeadm, kubelet and kubectl installed only.

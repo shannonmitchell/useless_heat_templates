@@ -45,6 +45,11 @@ parameters:
       - allowed_values: [ 'noaction', 'reposetup', 'init_n_slaves' ]
         description: reposetup will just set up the repos and install kubectl/kubeadm & kubelet. init_n_slaves will do the master init and join the slaves in. 
     default: 'noaction'
+  kube_version:
+    type: string
+    label: kube_version
+    description: debian package version to install.  Defaulting to 1.11.3-00 as it behind the current 1.12.0-00. Needed in an upgrade lab later. (https://packages.cloud.google.com/apt/dists/kubernetes-xenial/main/binary-amd64/Packages)
+    default: 1.11.3-00
 
 
 resources:
@@ -184,8 +189,8 @@ resources:
                       for PKGNAME in kubelet kubeadm kubectl; do
                         dpkg -s ${PKGNAME} > /dev/null 2>&1
                         if [ $? != 0 ] ; then
-                          echo "Installing ${PKGNAME}"
-                          apt-get -y install ${PKGNAME} > /dev/null 2>&1
+                          echo "Installing ${PKGNAME}=%kube_version%"
+                          apt-get -y install ${PKGNAME}=%kube_version% > /dev/null 2>&1
                         fi
                       done
                     
@@ -263,6 +268,7 @@ resources:
                 params:
                   "%slave_nodes%": { get_param: slave_nodes }
                   "%step%": { get_param: step }
+                  "%kube_version%": { get_param: kube_version }
                   "%wc_notify%": { get_attr: [wait_handle_master, curl_cli] }
 
 
@@ -384,8 +390,8 @@ resources:
                       for PKGNAME in kubelet kubeadm kubectl; do
                         dpkg -s ${PKGNAME} > /dev/null 2>&1
                         if [ $? != 0 ] ; then
-                          echo "Installing ${PKGNAME}"
-                          apt-get -y install ${PKGNAME} > /dev/null 2>&1
+                          echo "Installing ${PKGNAME}=%kube_version%"
+                          apt-get -y install ${PKGNAME}=%kube_version% > /dev/null 2>&1
                         fi
                       done
                     
@@ -410,6 +416,7 @@ resources:
                 params:
                   "%slave_nodes%": { get_param: slave_nodes }
                   "%step%": { get_param: step }
+                  "%kube_version%": { get_param: kube_version }
                   "%wc_notify%": { get_attr: [wait_handle_slaves, curl_cli] }
 
         runcmd:
