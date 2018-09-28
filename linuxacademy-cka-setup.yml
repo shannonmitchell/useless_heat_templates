@@ -17,16 +17,26 @@ parameters:
     label: SlaveNodes
     description: Number of Kubernetes Slave Nodes
     default: 3
-  flavor:
+  master_flavor:
     type: string
-    label: Flavor
-    description: Flavor
+    label: Master Flavor
+    description: Kubernetes Master Flavor
+    default: 'releng-general1-8'
+  slave_flavor:
+    type: string
+    label: Slave Flavor
+    description: Kubernetes Slaves Flavor
     default: 'releng-general1-8'
   key_name:
     type: string
     label: Key Name
     description: Name of the key-pair to be used for the initial logins(user ubuntu or centos depending)
     default: deploy-phobos
+  network_id:
+    type: string
+    label: Network ID
+    description: ID of the openstack network to connect devices to. All comms will be flannel/vxlan over it.
+    default: 8dd6207d-a1f5-4dfe-b97d-a8c967eb8548
   step:
     type: string
     label: step
@@ -73,9 +83,9 @@ resources:
       key_name: { get_param: key_name }
       name: "kube_master"
       image: { get_param: image }
-      flavor: { get_param: flavor }
+      flavor: { get_param: master_flavor }
       networks:
-      - network: 8dd6207d-a1f5-4dfe-b97d-a8c967eb8548
+      - network: { get_param: network_id }
       config_drive: True
       user_data_format: RAW
       user_data: { get_resource: cloud_config_kube_master_instance }
@@ -286,9 +296,9 @@ resources:
           name: "kube_slave%index%"
           key_name: { get_param: key_name }
           image: { get_param: image }
-          flavor: { get_param: flavor }
+          flavor: { get_param: slave_flavor }
           networks:
-          - network: 8dd6207d-a1f5-4dfe-b97d-a8c967eb8548
+          - network: { get_param: network_id }
           config_drive: True
           user_data_format: RAW
           user_data: { get_resource: cc_kube_slave_instance }
