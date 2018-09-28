@@ -3,7 +3,7 @@ Dumping ground for some temporary junk heat templates.
 
 ## linuxacademy-cka-setup.yml 
 
-With Defaults:
+Example:
 ```bash
 openstack --os-cloud phobos stack create -t linuxacademy-cka-setup.yml --parameter step=init_n_slaves shannon-kubernetes
 ```
