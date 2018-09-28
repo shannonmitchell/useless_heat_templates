@@ -1,0 +1,425 @@
+heat_template_version: newton
+
+description: Set up a very simple kubernetes env for linux academy training
+
+
+parameters:
+  image:
+    type: string
+    label: Image
+    description: Images used by the linuxacademy class
+    constraints:
+      - allowed_values: [ 'CentOS 7', 'Ubuntu 16.04' ]
+        description: Value must be one of 'CentOS 7' or 'Ubuntu 16.04'
+    default: 'Ubuntu 16.04'
+  slave_nodes:
+    type: number
+    label: SlaveNodes
+    description: Number of Kubernetes Slave Nodes
+    default: 3
+  flavor:
+    type: string
+    label: Flavor
+    description: Flavor
+    default: 'releng-general1-8'
+  key_name:
+    type: string
+    label: Key Name
+    description: Name of the key-pair to be used for the compute instance
+    default: deploy-phobos
+  step:
+    type: string
+    label: step
+    description: Steps Taken for Lab Prep
+    constraints:
+      - allowed_values: [ 'noaction', 'reposetup', 'init_n_slaves' ]
+        description: reposetup will just set up the repos and install kubectl/kubeadm & kubelet. init_n_slaves will do the master init and join the slaves in. 
+    default: 'noaction'
+
+
+resources:
+
+  #########
+  # General
+  #########
+  keypair:
+    type: OS::Nova::KeyPair
+    properties:
+      name:
+        str_replace:
+          template: "%heat_stack_prefix%-deploy-keypair"
+          params:
+            "%heat_stack_prefix%": { get_param: 'OS::stack_name' }
+      save_private_key: True
+
+  ####################
+  # Kubernetes Master
+  ####################
+
+  wait_condition_master:
+    type: OS::Heat::WaitCondition
+    properties:
+      handle: { get_resource: wait_handle_master }
+      count: 1
+      timeout: 18000
+
+  wait_handle_master:
+    type: OS::Heat::WaitConditionHandle
+
+  kube_master_instance:
+    type: OS::Nova::Server
+    depends_on: [ wait_condition_slaves ]
+    properties:
+      key_name: { get_param: key_name }
+      name: "kube_master"
+      image: { get_param: image }
+      flavor: { get_param: flavor }
+      networks:
+      - network: 8dd6207d-a1f5-4dfe-b97d-a8c967eb8548
+      config_drive: True
+      user_data_format: RAW
+      user_data: { get_resource: cloud_config_kube_master_instance }
+
+  cloud_config_kube_master_instance:
+    type: OS::Heat::CloudConfig
+    properties:
+      cloud_config:
+        output:
+          all: '| tee -a /var/log/cloud-init-output.log'
+        apt_upgrade: true
+        packages:
+          - python
+          - curl
+        write_files:
+          - path: /root/.ssh/id_rsa
+            permissions: "0400"
+            content: { get_attr: [ keypair, private_key ] }
+          - path: /root/.ssh/id_rsa.pub
+            permissions: "0600"
+            content: { get_attr: [ keypair, public_key ] }
+          - path: /root/.ssh/authorized_keys
+            permissions: "0644"
+            content: { get_attr: [ keypair, public_key ] }
+          - path: /root/slave_ips.txt
+            permissions: "0600"
+            content: { list_join: [':', { get_attr: [kube_slave_resources, first_address] }] }
+          - path: /root/slave_names.txt
+            permissions: "0600"
+            content: { list_join: [':', { get_attr: [kube_slave_resources, name] }] }
+          - path: /opt/runcmd-bash
+            permissions: "0700"
+            content:
+              str_replace:
+                template: |
+                  #!/bin/bash
+
+                  # Show commands in output
+                  set -x
+
+                  # Set the home as it will cause failures due to the cloud-init env
+                  . /root/.bashrc
+                  export HOME="/root"
+
+                  # Clean up ip addresses and set up mappings
+                  for CURFILE in $(ls /root/*_ips.txt /root/*_names.txt); do sed -i -e 's/:/\n/g' $CURFILE; done
+                  for CURBASE in $(ls /root/*{names,ips}.txt | awk -F '_' '{print $1}' | sort | uniq); do pr -s -tm ${CURBASE}_ips.txt ${CURBASE}_names.txt > ${CURBASE}_maps.txt; done
+
+                  # Use the maps to set up /etc/hosts
+                  awk '{split($2,a,"-"); print $1" "$2" "a[2]}' /root/*_maps.txt >> /etc/hosts
+
+                  ########################################
+                  #---------------------------------------
+                  # Do the repo setup if step == reposetup
+                  #---------------------------------------
+                  ########################################
+                  if [ "%step%" == 'reposetup' ] || [ "%step%" == 'init_n_slaves' ] ; then
+
+                    #################################
+                    # Install Ubuntu Based Packages
+                    #################################
+                    DISTRO='oneortheother'
+                    if [ -e '/etc/lsb-release' ] ; then
+                      . /etc/lsb-release
+                      if [ "${DISTRIB_ID}" == "Ubuntu" ] ; then
+                        DISTRO='ubuntu'
+                      fi
+                      echo "Found Ubuntu.  Updating apt cache"
+                      apt-get update > /dev/null 2>&1
+                    fi
+                    
+                    if [ "${DISTRO}" == "ubuntu" ] ; then
+                    
+                      # Install docker
+                      PKGNAME="docker.io"
+                      dpkg -s ${PKGNAME} > /dev/null 2>&1
+                      if [ $? != 0 ] ; then
+                        echo "Installing ${PKGNAME}"
+                        apt-get -y install ${PKGNAME} > /dev/null 2>&1
+                      fi
+                    
+                      # Add google packages key
+                      if [ $(apt-key list  | grep 'Google Cloud Packages' | wc -l) -ne 2 ] ; then
+                        echo "Adding key from https://packages.cloud.google.com/apt/doc/apt-key.gpg"
+                        curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+                      fi
+                    
+                      # Add kubernetes repo
+                      if [ ! -e '/etc/apt/sources.list.d/kubernetes.list' ] ; then
+                        echo "deb http://apt.kubernetes.io/ kubernetes-xenial main" > /etc/apt/sources.list.d/kubernetes.list
+                        echo "Updating apt to cache kubernetes-xenial"
+                        apt-get update > /dev/null 2>&1
+                      fi
+                    
+                      # Install kubelet kubeadm and kubectl
+                      for PKGNAME in kubelet kubeadm kubectl; do
+                        dpkg -s ${PKGNAME} > /dev/null 2>&1
+                        if [ $? != 0 ] ; then
+                          echo "Installing ${PKGNAME}"
+                          apt-get -y install ${PKGNAME} > /dev/null 2>&1
+                        fi
+                      done
+                    
+                    fi
+                    
+                    
+                    # Make sure the systemd cgroup is being used
+                    if [ ! -e '/etc/docker/daemon.json' ] ; then
+                      echo "Creating /etc/docker/daemon.json to use systemd cgroup for docker"
+                      cat <<EOF > /etc/docker/daemon.json
+                    {
+                       "exec-opts": ["native.cgroupdriver=systemd"]
+                    }
+                  EOF
+                    fi
+                    
+                  fi # End repossetup step
+
+
+
+
+                  ############################################
+                  #-------------------------------------------
+                  # Do the repo setup if step == init_n_slaves
+                  #-------------------------------------------
+                  ############################################
+                  if [ "%step%" == 'init_n_slaves' ] ; then
+
+                    # Init with flannel
+                    if [ ! -e '/root/kubeadm_init.log' ] ; then
+                      stdbuf -i0 -o0 -e0 kubeadm init --pod-network-cidr=10.244.0.0/16 | tee /root/kubeadm_init.log
+                    fi
+                    
+                    # Get home and user
+                    if [ -d '/home/centos' ] ; then
+                      CURHOME='/home/centos'
+                      CURUSER='centos'
+                    else
+                      CURHOME='/home/ubuntu'
+                      CURUSER='ubuntu'
+                    fi
+                    
+                    # Create the .kube dir in home dir
+                    if [ ! -e "${CURHOME}/.kube" ] ; then
+                      mkdir ${CURHOME}/.kube
+                      chown ${CURUSER}: ${CURHOME}/.kube
+                    fi
+                    
+                    # Copy the config
+                    if [ ! -e "${CURHOME}/.kube/config" ] ; then
+                      cp -i /etc/kubernetes/admin.conf ${CURHOME}/.kube/config
+                      chown ${CURUSER}: ${CURHOME}/.kube/config
+                    fi
+                    
+                    # Apply flannel CNI as the non-root user
+                    if [ ! -e "${CURHOME}/flannel-output.txt" ] ; then
+                      stdbuf -o0 -e0 -i0 su -c 'kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml' ubuntu | tee ${CURHOME}/flannel-output.txt
+                    fi
+                    
+                    # Join the slaves
+                    JOINCMD=$(grep 'kubeadm join' /root/kubeadm_init.log | sed -e 's/^  //g')
+                    for CURSLAVE in $(cat /root/slave_names.txt); do
+                      CURNODENAME=$(echo ${CURSLAVE} | sed -e 's/_/-/g')
+                      su -c "kubectl get node ${CURNODENAME}" ubuntu > /dev/null 2>&1
+                      if [ $? != 0 ] ; then
+                        echo ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@${CURSLAVE} "${JOINCMD}"
+                        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null root@${CURSLAVE} "${JOINCMD}"
+                      fi
+                    done
+
+                  fi # End init_n_slaves step
+
+                  %wc_notify% -k --data-binary "{\"status\": \"SUCCESS\", \"reason\": \"passed to step %step%\", \"data\": \"passed at step %step%\"}"
+
+                params:
+                  "%slave_nodes%": { get_param: slave_nodes }
+                  "%step%": { get_param: step }
+                  "%wc_notify%": { get_attr: [wait_handle_master, curl_cli] }
+
+
+        runcmd:
+          - tmux new-session -s postscripts -d 'stdbuf -i 0 -o 0 -e 0 /opt/runcmd-bash 2>&1 | tee /root/runcmd-bash.log'
+
+
+
+
+  ####################
+  # Kubernetes Slaves
+  ####################
+  wait_condition_slaves:
+    type: OS::Heat::WaitCondition
+    properties:
+      handle: { get_resource: wait_handle_slaves }
+      count: { get_param: slave_nodes }
+      timeout: 18000
+
+  wait_handle_slaves:
+    type: OS::Heat::WaitConditionHandle
+
+  kube_slave_resources:
+    type: OS::Heat::ResourceGroup
+    properties:
+      count: { get_param: slave_nodes }
+      removal_policies: [ { "resource_list": ["0"] } ]
+      resource_def:
+        type: OS::Nova::Server
+        properties:
+          name: "kube_slave%index%"
+          key_name: { get_param: key_name }
+          image: { get_param: image }
+          flavor: { get_param: flavor }
+          networks:
+          - network: 8dd6207d-a1f5-4dfe-b97d-a8c967eb8548
+          config_drive: True
+          user_data_format: RAW
+          user_data: { get_resource: cc_kube_slave_instance }
+
+  cc_kube_slave_instance:
+    type: OS::Heat::CloudConfig
+    properties:
+      cloud_config:
+        output:
+          all: '| tee -a /var/log/cloud-init-output.log'
+        apt_upgrade: true
+        packages:
+          - python
+          - curl
+        write_files:
+          - path: /root/.ssh/id_rsa
+            permissions: "0400"
+            content: { get_attr: [ keypair, private_key ] }
+          - path: /root/.ssh/id_rsa.pub
+            permissions: "0600"
+            content: { get_attr: [ keypair, public_key ] }
+          - path: /root/.ssh/authorized_keys
+            permissions: "0644"
+            content: { get_attr: [ keypair, public_key ] }
+          - path: /opt/runcmd-bash
+            permissions: "0700"
+            content:
+              str_replace:
+                template: |
+                  #!/bin/bash
+
+                  # Show commands in output
+                  set -x
+
+                  # Set the home as it will cause failures due to the cloud-init env
+                  . /root/.bashrc
+                  export HOME="/root"
+
+                  ########################################
+                  #---------------------------------------
+                  # Do the repo setup if step == reposetup
+                  #---------------------------------------
+                  ########################################
+                  if [ "%step%" == 'reposetup' ] || [ "%step%" == 'init_n_slaves' ] ; then
+
+                    #################################
+                    # Install Ubuntu Based Packages
+                    #################################
+                    DISTRO='oneortheother'
+                    if [ -e '/etc/lsb-release' ] ; then
+                      . /etc/lsb-release
+                      if [ "${DISTRIB_ID}" == "Ubuntu" ] ; then
+                        DISTRO='ubuntu'
+                      fi
+                      echo "Found Ubuntu.  Updating apt cache"
+                      apt-get update > /dev/null 2>&1
+                    fi
+                    
+                    if [ "${DISTRO}" == "ubuntu" ] ; then
+                    
+                      # Install docker
+                      PKGNAME="docker.io"
+                      dpkg -s ${PKGNAME} > /dev/null 2>&1
+                      if [ $? != 0 ] ; then
+                        echo "Installing ${PKGNAME}"
+                        apt-get -y install ${PKGNAME} > /dev/null 2>&1
+                      fi
+                    
+                      # Add google packages key
+                      if [ $(apt-key list  | grep 'Google Cloud Packages' | wc -l) -ne 2 ] ; then
+                        echo "Adding key from https://packages.cloud.google.com/apt/doc/apt-key.gpg"
+                        curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+                      fi
+                    
+                      # Add kubernetes repo
+                      if [ ! -e '/etc/apt/sources.list.d/kubernetes.list' ] ; then
+                        echo "deb http://apt.kubernetes.io/ kubernetes-xenial main" > /etc/apt/sources.list.d/kubernetes.list
+                        echo "Updating apt to cache kubernetes-xenial"
+                        apt-get update > /dev/null 2>&1
+                      fi
+                    
+                      # Install kubelet kubeadm and kubectl
+                      for PKGNAME in kubelet kubeadm kubectl; do
+                        dpkg -s ${PKGNAME} > /dev/null 2>&1
+                        if [ $? != 0 ] ; then
+                          echo "Installing ${PKGNAME}"
+                          apt-get -y install ${PKGNAME} > /dev/null 2>&1
+                        fi
+                      done
+                    
+                    fi
+                    
+                    
+                    # Make sure the systemd cgroup is being used
+                    if [ ! -e '/etc/docker/daemon.json' ] ; then
+                      echo "Creating /etc/docker/daemon.json to use systemd cgroup for docker"
+                      cat <<EOF > /etc/docker/daemon.json
+                    {
+                       "exec-opts": ["native.cgroupdriver=systemd"]
+                    }
+                  EOF
+                    fi
+
+
+                  fi # End repossetup step
+
+                  %wc_notify% -k --data-binary "{\"status\": \"SUCCESS\", \"reason\": \"passed to step %step%\", \"data\": \"passed at step %step%\"}"
+                    
+                params:
+                  "%slave_nodes%": { get_param: slave_nodes }
+                  "%step%": { get_param: step }
+                  "%wc_notify%": { get_attr: [wait_handle_slaves, curl_cli] }
+
+        runcmd:
+          - tmux new-session -s postscripts -d 'stdbuf -i 0 -o 0 -e 0 /opt/runcmd-bash 2>&1 | tee /root/runcmd-bash.log'
+
+
+###################
+# Output/Display
+###################
+outputs:
+  kube_master_name:
+    description: Name of the instance
+    value: { get_attr: [ kube_master_instance, name ] }
+  kube_master_ip:
+    description: IP address of the instance.
+    value: { get_attr: [ kube_master_instance, first_address ] }
+  kube_slave_names:
+    description: Kube Slave Names
+    value: { get_attr: [kube_slave_resources, name] }
+  kube_slaves_ips:
+    description: Kube Slave IP Addresses
+    value: { get_attr: [kube_slave_resources, first_address] }
+
